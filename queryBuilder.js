@@ -8,15 +8,20 @@ const PAGINATION_COLS = [
 class QueryBuilder {
 	constructor() {
 		this.paginated = false;
+		this.includeMetadata = false;
 		this.columns = [];
 		this.tables = [];
 		this.wheres = [];
 		this.joins = [];
-		this.limit;
-
+		this._limit;
+		this._offset;
 		this.sorts = [];
-
 		this.params = [];
+
+		/**
+		 * Stores pagination, search and filter config
+		 */
+		this.config = { filter: null };
 	}
 
 	select(column, alias = undefined) {
@@ -40,8 +45,11 @@ class QueryBuilder {
 	where(where, jointype = undefined) {
 		if (this.wheres.length > 0) {
 			jointype = jointype || 'AND';
+		} else {
+			// no jointype if no other wheres
+			jointype = '';
 		}
-		this.wheres.push(`${jointype} ${where}`);
+		this.wheres.push(`${jointype ? jointype : ''} ${where}`);
 		return this;
 	}
 
@@ -99,10 +107,18 @@ class QueryBuilder {
 		const offset = (page - 1) * per;
 
 		this.params.push();
-		this.limit = `OFFSET ${this._addParam(offset)} LIMIT ${this._addParam(
-			limit
-		)}`;
+		this._limit = limit;
+		this._offset = offset;
+
 		return this;
+	}
+
+	limit(limit) {
+		this._limit = this._addParam(limit);
+	}
+
+	offset(offset) {
+		this._offset = this._addParam(offset);
 	}
 
 	/**
@@ -111,6 +127,7 @@ class QueryBuilder {
 	 * @return {QueryBuilder}
 	 */
 	pagination(pagination = undefined, countCol = undefined) {
+		this.config.pagination = pagination;
 		// don't do it twice
 		if (this.paginated) {
 			return this;
@@ -155,10 +172,14 @@ class QueryBuilder {
 		); // get's total pages
 		this.select(`COUNT(${countCol}) OVER()::int`, '_pagination_total_items'); // get's total pages
 
+		this.includeMetadata = true;
+
 		return this;
 	}
 
 	search(search = undefined, searchCols = [], ignoreCase = true) {
+		this.config.search = search;
+
 		// support single value
 		if (!search || !search.query) {
 			// WHERE LOWER(x) LIKE LOWER("%y%")
@@ -192,6 +213,135 @@ class QueryBuilder {
 		return this;
 	}
 
+	/**
+	 * @typedef Filter
+	 * @property {string} filter_column - the column to filter on
+	 * @property {string[]} filter_values - an array of values to filter on
+	 */
+
+	/**
+	 * Generate filter SQL for the given object
+	 * @param  {Filter} filter         the filter configuration
+	 * @param  {string} filterColAlias the alias of the table that filters should be applied when there is ambiguity
+	 * @return {[type]}                [description]
+	 */
+	filter(filter, filterColAlias = undefined) {
+		this.config.filter = filter;
+		let filterGroup = [];
+
+		// This generates a structure with
+		// IN () the same props
+		// AND different props
+		// like
+		// WHERE ...
+		//    -- filter group
+		// 		AND
+		// 			(
+		// 				(	prop IN ($1, $2))
+		// 					AND
+		// 				( prop2  IN ($3, $4))
+		// 					AND
+		// 				( prop2  IN ($3, $4) OR prop IS NULL)
+		// 			)
+		for (let prop in filter) {
+			// if any of these are filtering for NULL we need to add a `OR prop IS NULL`
+			const hasNull = filter[prop].includes(null);
+
+			const colAlias = filterColAlias ? `${filterColAlias}.` : '';
+
+			// If we are filtering for a null value, then use IS NULL instead of IN (NULL)`
+			let nullSql = '';
+			if (hasNull) {
+				nullSql = `OR ${colAlias}${prop} IS NULL`;
+			}
+
+			filterGroup.push(
+				`(
+					${colAlias}${prop} IN (${this._addParams(filter[prop])})
+					${nullSql}
+  			)`
+			);
+		}
+		if (filterGroup.length == 0) {
+			return this;
+		}
+		let filterWhere = `(${filterGroup.join(' AND ')})`;
+		return this.where(filterWhere, 'AND');
+	}
+
+	/**
+	 * Takes an object with zero or more list of filters to be applied to array columns
+	 * @return {[type]} [description]
+	 */
+	filterArray(filterArrays, alias, matchNull = false) {
+		Object.assign(this.config.filter, filterArrays);
+
+		for (let prop in filterArrays) {
+			this._filterArray(filterArrays[prop], prop, alias, matchNull);
+		}
+		return this;
+	}
+
+	/**
+	 * Filters a single column with a list of values, optionally also matching null
+	 * @param  {string}  column        [description]
+	 * @param  {string}  filterColAlias [description]
+	 * @param  {string[]}  filterValues  [description]
+	 * @param  {Boolean} matchNull     [description]
+	 * @return {QueryBuilder}                [description]
+	 */
+	_filterArray(
+		filterValues,
+		column,
+		filterColAlias = undefined,
+		matchNull = false
+	) {
+		const colname = `${filterColAlias ? `${filterColAlias}.` : ''}${column}`;
+
+		// AND
+		// 	(
+		// 			(value = ANY (column))
+		// 			AND
+		// 			(value = ANY (column))
+		//
+		// 			-- also match null
+		// 			OR (
+		// 				array_position(column, NULL) is not NULL
+		// 				OR
+		// 				column is null
+		// 			)
+		// 	)
+		//
+
+		let groups = [];
+		for (let value of filterValues) {
+			groups.push(
+				`(array_position(${colname}, ${this._addParam(value)}) is not NULL)`
+			);
+			// groups.push(`(value = ANY (${colname}))`);
+		}
+
+		let nullMatchSql = '';
+		if (matchNull) {
+			nullMatchSql = `OR (
+					(
+						array_position(${colname}, NULL) is not NULL
+						OR ${colname} is NULL
+					)
+				)`;
+			// groups.push(`(${colname} is NULL)`);
+		}
+
+		const filterWhere = `(
+		(
+			\n\t${groups.join(`\n\t AND \n\t`)}\n\t
+		) ${nullMatchSql}
+		) `;
+		return this.where(filterWhere, 'AND');
+
+		// return this;
+	}
+
 	sort(column, direction = undefined) {
 		this.sorts.push(`${column} ${direction ? direction : ''}`);
 		return this;
@@ -219,20 +369,103 @@ class QueryBuilder {
 		return `$${this.params.length}`;
 	}
 
-	sql() {
-		const sql = `
-SELECT
-  ${this.columns.join(',\n  ')}
-FROM
-  ${this.tables.join(',\n  ')}
-  ${this.joins.join('\n  ')}
-WHERE
-  ${this.wheres.join('\n  ')}
-${this.sorts.length ? `ORDER BY \n ${this.sorts.join(',\n ')}` : ``}
-${this.limit ? this.limit : ''}
-`;
+	_addParams(valueArray) {
+		if (!valueArray) {
+			return;
+		}
+		let params = [];
+		for (let param of valueArray) {
+			params.push(this._addParam(param));
+		}
+		return params;
+	}
 
+	format(sql) {
+		return sql;
+	}
+
+	_generateSQL() {
+		const sql = `SELECT
+			  ${this.columns.join(',\n  ')}
+			FROM
+			  ${this.tables.join(',\n  ')}
+			  ${this.joins.join('\n  ')}
+			${this.wheres.length > 0 ? 'WHERE' : ''}
+			  ${this.wheres.join('\n  ')}
+			${this.sorts.length ? `ORDER BY \n ${this.sorts.join(',\n ')}` : ``}
+
+			${this._offset ? `OFFSET ${this._offset}` : ''}
+			${this._limit ? `LIMIT ${this._limit}` : ''}
+			`;
+		return sql;
+	}
+
+	sql(formatted = true) {
+		let sql = this._generateSQL();
 		return { sql, params: this.params };
+	}
+
+	/**
+	 * Takes a result set and strips out the PAGINATION_COLS into a combined meta
+	 * @return {Object} `{ meta: {}, results: {}}`]
+	 */
+	extractPaginatedResults(results) {
+		let paginatedResults = {
+			meta: {
+				page: undefined,
+				per: undefined,
+				num_pages: undefined,
+				total_items: undefined,
+				sortBy: this.config.pagination
+					? this.config.pagination.sortBy
+					: undefined,
+				sortDir: this.config.pagination
+					? this.config.pagination.sortDir
+					: undefined,
+				// pagination: this.config.pagination,
+				search: this.config.search,
+				filter: this.config.filter,
+			},
+			results: [],
+		};
+
+		// get pagination data from first result
+		if (results.length > 0) {
+			let res = results[0];
+			paginatedResults.meta.page = res._pagination_page;
+			paginatedResults.meta.per = res._pagination_per_page;
+			paginatedResults.meta.num_pages = res._pagination_num_pages;
+			paginatedResults.meta.total_items = res._pagination_total_items;
+		}
+
+		// remove pagination properties
+		paginatedResults.results = results.map((result) => {
+			result._pagination_page = undefined;
+			result._pagination_per_page = undefined;
+			result._pagination_num_pages = undefined;
+			result._pagination_total_items = undefined;
+			return result;
+		});
+
+		return paginatedResults;
+	}
+
+	findOne(db) {
+		let query = this.sql();
+		return db.findOne(query.sql, query.params);
+	}
+
+	async findMany(db) {
+		let query = this.sql();
+		let results = await db.findMany(query.sql, query.params).catch((err) => {
+			console.error(err);
+			throw err;
+		});
+
+		if (this.includeMetadata) {
+			return this.extractPaginatedResults(results);
+		}
+		return results;
 	}
 }
 
