@@ -12,6 +12,7 @@ class QueryBuilder {
 		this.columns = [];
 		this.tables = [];
 		this.wheres = [];
+		this.groups = [];
 		this.joins = [];
 		this._limit;
 		this._offset;
@@ -60,6 +61,13 @@ class QueryBuilder {
 		return this._where(column, param, jointype, '!=');
 	}
 
+	whereIsTrue(column, jointype = undefined) {
+		return this._where(column, true, jointype, '=');
+	}
+	whereIsFalse(column, jointype = undefined) {
+		return this._where(column, false, jointype, '=');
+	}
+
 	whereLike(column, param, jointype = undefined, ignoreCase = true) {
 		if (ignoreCase) {
 			return this.where(
@@ -88,7 +96,25 @@ class QueryBuilder {
 		return this._where(column, param, jointype, '<');
 	}
 	whereLTE(column, param, jointype = undefined) {
-		return this._where(column, param, jointype, '<');
+		return this._where(column, param, jointype, '<=');
+	}
+
+	whereBetween(column, min, max, jointype = undefined) {
+		// WHERE column BETWEEN min AND max
+		return this._between(column, min, max, false, jointype);
+	}
+	whereNotBetween(column, min, max, jointype = undefined) {
+		// WHERE column NOT BETWEEN min AND max
+		return this._between(column, min, max, true, jointype);
+	}
+
+	whereIncludes(column, valueList, jointype = undefined) {
+		return this.where(`${column} IN (${this._addParams(valueList)})`, jointype);
+	}
+
+	groupBy(column) {
+		this.groups.push(column);
+		return this;
 	}
 
 	left_join(table, onClause, alias = undefined) {
@@ -124,9 +150,14 @@ class QueryBuilder {
 	/**
 	 * Takes a pagination object as per the pagination middleware
 	 * @param  {PaginationAndSort} pagination
+	 * @countCol {string} the column to use as an overall count
 	 * @return {QueryBuilder}
 	 */
-	pagination(pagination = undefined, countCol = undefined) {
+	pagination(
+		pagination = undefined,
+		countCol = undefined,
+		sortColAlias = undefined
+	) {
 		this.config.pagination = pagination;
 		// don't do it twice
 		if (this.paginated) {
@@ -140,8 +171,9 @@ class QueryBuilder {
 		if (pagination.page && pagination.per) {
 			this.page(pagination.page, pagination.per);
 		}
+
 		if (pagination.sortBy) {
-			this.sort(pagination.sortBy, pagination.sortDir || null);
+			this.sort(pagination.sortBy, pagination.sortDir || null, sortColAlias);
 		}
 
 		if (pagination.includeMetadata && countCol) {
@@ -226,7 +258,8 @@ class QueryBuilder {
 	 * @return {[type]}                [description]
 	 */
 	filter(filter, filterColAlias = undefined) {
-		this.config.filter = filter;
+		this.config.filter = this.config.filter || {};
+		Object.assign(this.config.filter, filter);
 		let filterGroup = [];
 
 		// This generates a structure with
@@ -269,11 +302,28 @@ class QueryBuilder {
 		return this.where(filterWhere, 'AND');
 	}
 
+	betweenColumnValues(filter, minCol, maxCol, filterColAlias = undefined) {
+		if (!(filter && filter.name)) {
+			return this;
+		}
+
+		this.config.filter[filter.name] = filter.value;
+		const colAlias = filterColAlias ? `${filterColAlias}.` : '';
+		if (!filter.value) {
+			return this;
+		}
+		this.whereLTE(`${colAlias}${minCol}`, filter.value, 'AND');
+		this.whereGTE(`${colAlias}${maxCol}`, filter.value, 'AND');
+		return this;
+	}
+
 	/**
 	 * Takes an object with zero or more list of filters to be applied to array columns
 	 * @return {[type]} [description]
 	 */
 	filterArray(filterArrays, alias, matchNull = false) {
+		this.config.filter = this.config.filter || {};
+
 		Object.assign(this.config.filter, filterArrays);
 
 		for (let prop in filterArrays) {
@@ -342,9 +392,17 @@ class QueryBuilder {
 		// return this;
 	}
 
-	sort(column, direction = undefined) {
-		this.sorts.push(`${column} ${direction ? direction : ''}`);
+	orderBy(column, direction = undefined, orderColAlias = undefined) {
+		this.sorts.push(
+			`${orderColAlias ? `${orderColAlias}.` : ''}${column} ${
+				direction ? direction : ''
+			}`
+		);
 		return this;
+	}
+
+	sort(column, direction = undefined, sortColAlias = undefined) {
+		return this.orderBy(column, direction, sortColAlias);
 	}
 
 	_where(column, param, jointype = undefined, operator = '=') {
@@ -352,6 +410,17 @@ class QueryBuilder {
 			jointype = jointype || 'AND';
 		}
 		const clause = `${column} ${operator} ${this._addParam(param)}`;
+		this.wheres.push(jointype ? `${jointype} ${clause}` : clause);
+		return this;
+	}
+
+	_between(column, min, max, not = false, jointype = undefined) {
+		if (this.wheres.length > 0) {
+			jointype = jointype || 'AND';
+		}
+		const clause = `${column}  ${not ? 'NOT' : ''} BETWEEN ${this._addParam(
+			min
+		)} AND ${this._addParam(max)}`;
 		this.wheres.push(jointype ? `${jointype} ${clause}` : clause);
 		return this;
 	}
@@ -392,6 +461,10 @@ class QueryBuilder {
 			  ${this.joins.join('\n  ')}
 			${this.wheres.length > 0 ? 'WHERE' : ''}
 			  ${this.wheres.join('\n  ')}
+
+
+		  ${this.groups.length ? `GROUP BY \n ${this.groups.join(',\n  ')}` : ``}
+
 			${this.sorts.length ? `ORDER BY \n ${this.sorts.join(',\n ')}` : ``}
 
 			${this._offset ? `OFFSET ${this._offset}` : ''}
@@ -466,6 +539,10 @@ class QueryBuilder {
 			return this.extractPaginatedResults(results);
 		}
 		return results;
+	}
+
+	dump() {
+		console.log(this._generateSQL(), this.params);
 	}
 }
 
