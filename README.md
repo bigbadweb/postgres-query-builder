@@ -20,8 +20,8 @@ const query = builder.select('table_alias.column_name', 'col_alias')
 ```
 
 
-```
-{
+```.js
+const query = {
  sql: `
 SELECT
             table_alias.column_name AS col_alias
@@ -29,7 +29,7 @@ SELECT
             table_name table_alias
         
         WHERE
-            col_alias.column_name = $1`
+            col_alias.column_name = $1`,
  params:  [ 'value' ]
 }
 ```
