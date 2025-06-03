@@ -5,7 +5,7 @@ const PAGINATION_COLS = [
     '_pagination_total_	items',
 ];
 
-const DIALECT = process.env.DB_DIALECT || 'mysql'; // default to postgres
+const DIALECT = process.env.DB_DIALECT || 'postgres'; // default to postgres
 
 class QueryBuilder {
     constructor() {

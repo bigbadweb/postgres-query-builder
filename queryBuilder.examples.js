@@ -8,7 +8,6 @@ const query = builder.select('table_alias.column_name', 'col_alias')
                     .sql();
 
 
-console.log(builder);
 console.log(query.sql);
 console.log(query.params);
 
@@ -28,7 +27,10 @@ const query2 = builder2
     .groupBy('tp.teacher_name')
     .groupBy('tp.id')
     .orderBy('tp.teacher_name', 'ASC')
+    .pagination({ page: 1, per: 10}, 10)
+    .filter({ 'tp.teacher_name': ["John Doe"] })
     .sql();
 
 console.log(query2.sql);
 console.log(query2.params);
+
