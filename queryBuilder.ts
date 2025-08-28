@@ -5,7 +5,7 @@ const PAGINATION_COLS = [
     '_pagination_total_items',
 ];
 
-const DIALECT = process.env.DB_DIALECT || 'postgres'; // default to postgres
+const getDialect = () => process.env.DB_DIALECT || 'postgres'; // default to postgres
 
 // Basic column type definitions for type safety
 type ColumnType = 'string' | 'number' | 'boolean' | 'date' | 'array' | 'json';
@@ -601,7 +601,8 @@ class QueryBuilder<TSchema extends SchemaDefinition = SchemaDefinition> {
     // returns the placeholder
     private _addParam(value: any): string {
         this.params.push(value);
-        if (DIALECT === 'mysql') {
+        const dialect = getDialect();
+        if (dialect === 'mysql') {
             return `?`;
         }
         return `$${this.params.length}`;
